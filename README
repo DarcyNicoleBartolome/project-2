@@ -1,0 +1,2 @@
+Install pip dependecies first to run GUI.py
+   - pip install -r requirements.txt
