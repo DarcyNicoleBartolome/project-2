@@ -7,6 +7,15 @@ import cv2
 import numpy as np
 import time
 
+import pyautogui
+import win32gui
+import win32ui
+import win32con
+
+import pygetwindow as gw
+
+from CTkColorPicker import *
+
 
 class Drawing(ctk.CTk):
    def __init__(self):
@@ -14,6 +23,10 @@ class Drawing(ctk.CTk):
       
       self.myPoints = []
       self.imgResult = None
+      self.drawingColor = "#202020"
+
+      # the window name, e.g "notepad", "Chrome", etc.
+      self.window_name = "Blender"
       
       # global coordinates and drawing state
       self.startX, self.startY = 0, 0
@@ -35,8 +48,11 @@ class Drawing(ctk.CTk):
       self.left = ctk.CTkFrame(self, corner_radius=16)
       self.left.grid(row=0, column=0, padx=(18, 10), pady=(18, 10), sticky="ns")
       
-      button = ctk.CTkButton(self.left, text="CTkButton", command=button_event)
-      button.grid(row=1, column=0, padx=12, pady=0)
+      button = ctk.CTkButton(self.left, text="Clear Canvas", command=self.clear_canvas)
+      button.grid(row=1, column=0, padx=12, pady=9)
+      
+      self.colorbutton = ctk.CTkButton(self.left, text="CHOOSE COLOR", text_color="black", command=self.ask_color)
+      self.colorbutton.grid(row=2, column=0, padx=12, pady=6)
       
       # Screen / preview
       self.center = ctk.CTkFrame(self, corner_radius=18)
@@ -59,8 +75,7 @@ class Drawing(ctk.CTk):
       self.preview.grid_rowconfigure(0, weight=1)
       self.preview.grid_columnconfigure(0, weight=1)
       
-      self.canvas = Canvas(self.preview, highlightthickness=0,
-                                 cursor="crosshair")
+      self.canvas = Canvas(self.preview, highlightthickness=0, cursor="crosshair")
       self.canvas.grid(row=0, column=0, sticky="nsew")
       self.canvas.bind("<Button-1>", self.start_stroke)
       self.canvas.bind("<B1-Motion>", self.draw_stroke)
@@ -72,16 +87,6 @@ class Drawing(ctk.CTk):
       # Create the background image item once, then update it each frame.
       self.video_item = self.canvas.create_image((0, 0), image="", anchor=NW)
       
-      
-
-      # self.video_label = ctk.CTkLabel(
-      #    self.preview,
-      #    text="Starting camera..."
-      # )
-      # self.video_label.grid(
-      #    row=0, column=0,
-      #    sticky="nsew"
-      # )
 
       # Camera state
       self._stop = threading.Event()
@@ -149,22 +154,9 @@ class Drawing(ctk.CTk):
          height = max(self.canvas.winfo_height(), 1)
 
          pil_image.thumbnail((width, height))
-
-         # Create a CustomTkinter-compatible image
-         # self._latest_imgtk = ctk.CTkImage(
-         #       light_image=pil_image,
-         #       dark_image=pil_image,
-         #       size=pil_image.size
-         # )
          
          # Create PhotoImage version
          self._latest_imgtk = ImageTk.PhotoImage(pil_image)
-
-         # Display the live frame
-         # self.canvas.configure(
-         #       image=self._latest_imgtk,
-         #       text=""
-         # )
          
          self.canvas.itemconfigure(self.video_item, image=self._latest_imgtk)
 
@@ -180,8 +172,9 @@ class Drawing(ctk.CTk):
       x, y = event.x, event.y
       self.canvas.create_line(
          self.last_point[0], self.last_point[1], x, y,
-         fill="#202020", width=5, capstyle=ROUND, joinstyle=ROUND,
-         smooth=True
+         fill=self.drawingColor, width=5, capstyle=ROUND, joinstyle=ROUND,
+         smooth=True,
+         tags="line"
       )
       self.last_point = (x, y)
 
@@ -189,7 +182,13 @@ class Drawing(ctk.CTk):
       self.last_point = None
 
    def clear_canvas(self):
-      self.canvas.delete("all")
+      self.canvas.delete("line")
+      
+   def ask_color(self):
+      pick_color = AskColor() # open the color picker
+      color = pick_color.get() # get the color string
+      self.colorbutton.configure(fg_color=color)
+      self.drawingColor = color
 
    def drawLine(self, event, x, y, flags, param):
          img = param
@@ -225,6 +224,23 @@ class Drawing(ctk.CTk):
          self.cap = None
 
       self.destroy()
+
+   def background_screenshot(self, hwnd, width, height):
+      wDC = win32gui.GetWindowDC(hwnd)
+      dcObj=win32ui.CreateDCFromHandle(wDC)
+      cDC=dcObj.CreateCompatibleDC()
+      dataBitMap = win32ui.CreateBitmap()
+      dataBitMap.CreateCompatibleBitmap(dcObj, width, height)
+      cDC.SelectObject(dataBitMap)
+      cDC.BitBlt((0,0),(width, height) , dcObj, (0,0), win32con.SRCCOPY)
+      dataBitMap.SaveBitmapFile(cDC, 'screenshot.bmp')
+      
+      image =  np.frombuffer(dataBitMap.GetBitmapBits(True), dtype=np.uint8).reshape(height, width, 4)
+      dcObj.DeleteDC()
+      cDC.DeleteDC()
+      win32gui.ReleaseDC(hwnd, wDC)
+      win32gui.DeleteObject(dataBitMap.GetHandle())
+      return image
       
 def button_event():
    print("button pressed - Clear Drawing")
