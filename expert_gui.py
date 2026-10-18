@@ -1,6 +1,7 @@
+from tkinter import filedialog
 from tkinter import *
 import customtkinter as ctk
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageGrab, ImageChops
 import threading
 import os
 import cv2
@@ -15,6 +16,8 @@ import win32con
 import pygetwindow as gw
 from CTkColorPicker import *
 
+import json
+
 
 
 class Drawing(ctk.CTk):
@@ -26,6 +29,8 @@ class Drawing(ctk.CTk):
         self.drawingColor = "#202020"
         self.pen_size = 5
         self.eraser_mode = False
+        self.stroke_data = []
+
 
         # the window name, e.g "notepad", "Chrome", etc.
         self.window_name = "Blender"
@@ -44,7 +49,7 @@ class Drawing(ctk.CTk):
         self.isDrawing = False
         
         # Set the Window information
-        self.title("Project 2")
+        self.title("Project 2 - Expert")
         self.geometry("1000x650")
         self.minsize(850, 560)
         
@@ -62,14 +67,10 @@ class Drawing(ctk.CTk):
         self.clear_button = ctk.CTkButton(self.left, text="Clear Canvas", command=self.clear_canvas)
         self.clear_button.grid(row=1, column=0, padx=12, pady=9)
         
-        # self.paint_button = ctk.CTkButton(self.left, text="Paint", command=self.clear_canvas)
-        # self.paint_button.grid(row=2, column=0, padx=12, pady=9)
-        
         self.paint_button = ctk.CTkButton(self.left, text="Paint", command=self.toggle_eraser_mode)
         self.paint_button.grid(row=3, column=0, padx=12, pady=9)
         
         self.colorbutton = ctk.CTkButton(self.left, text="CHOOSE COLOR", text_color="black", command=self.ask_color)
-        
         self.colorbutton.grid(row=4, column=0, padx=12, pady=6)
         
         self.text = ctk.CTkLabel(self.left, text="Pen Size", corner_radius=0)
@@ -82,6 +83,14 @@ class Drawing(ctk.CTk):
         self.avatar_button.grid(row=7, column=0, padx=12, pady=36)
         self.marker_button = ctk.CTkButton(self.left, text="Marker", text_color="black", command=self.add_marker)
         self.marker_button.grid(row=8, column=0, padx=12, pady=6)
+        
+        self.text2 = ctk.CTkLabel(self.left, text="Chatbox", corner_radius=0)
+        self.text2.grid(row=9, column=0, padx=12, pady=2)     
+        self.chatbox = ctk.CTkTextbox(self.left)
+        # self.chatbox.insert("0.0", "end")
+        self.chatbox.grid(row=10, column=0, padx=2, pady=2)
+        self.sendchatbutton = ctk.CTkButton(self.left, text="Send", text_color="black", command=self.send_message)
+        self.sendchatbutton.grid(row=11, column=0, padx=12, pady=6)
 
         # Screen / preview
         self.center = ctk.CTkFrame(self, corner_radius=18)
@@ -112,9 +121,10 @@ class Drawing(ctk.CTk):
         self.canvas.bind("<ButtonRelease-1>", self.end_stroke)
         self.last_point = None
         self.stroke_items = []
+        self._canvas_save_after_id = None
         
         # Create the background image item once, then update it each frame.
-        self.video_item = self.canvas.create_image((0, 0), image="", anchor=NW)
+        self.video_item = self.canvas.create_image((0,0), image="", anchor=NW)
         
 
         # Camera state
@@ -123,6 +133,12 @@ class Drawing(ctk.CTk):
         self._frame_lock = threading.Lock()
         self._latest_imgtk = None
         self._capture_interval = 1 / 30
+        
+        # with Image.open("test.png") as im:
+        self.x1 = self.canvas.winfo_rootx() + self.canvas.winfo_x()
+        self.y1 = self.canvas.winfo_rooty() + self.canvas.winfo_y()
+        self.x2 = self.x1 + self.canvas.winfo_width()
+        self.y2 = self.y1 + self.canvas.winfo_height()
 
         threading.Thread(
             target=self._reader_loop,
@@ -190,14 +206,17 @@ class Drawing(ctk.CTk):
 
             # Create PhotoImage version
             self._latest_imgtk = ImageTk.PhotoImage(pil_image)
-            
+            x = max((self.canvas.winfo_width() - self._latest_imgtk.width()) // 2, 0)
+            y = max((self.canvas.winfo_height() - self._latest_imgtk.height()) // 2, 0)
+            self.canvas.coords(self.video_item, x, y)
             self.canvas.itemconfigure(self.video_item, image=self._latest_imgtk)
+            self.canvas.tag_lower(self.video_item)
 
         self.after(33, self._render_latest_frame)
 
 
     def start_stroke(self, event):
-            self.last_point = (event.x, event.y)
+        self.last_point = (event.x, event.y)
     
     def draw_stroke(self, event):
         if self.eraser_mode:
@@ -209,6 +228,12 @@ class Drawing(ctk.CTk):
             for item in items:
                 if item in self.stroke_items:
                     self.canvas.delete(item)
+                    self.stroke_items.remove(item)
+
+                    self.stroke_data = [
+                        stroke for stroke in self.stroke_data if stroke["item"] != item
+                    ]
+
                     
         elif self.last_point is None:
             return
@@ -221,7 +246,20 @@ class Drawing(ctk.CTk):
                 tags="line"
             )
             self.stroke_items.append(item)
+            self.stroke_data.append({
+                "type": "stroke",
+                "item": item,
+                "x1": self.last_point[0],
+                "y1": self.last_point[1],
+                "x2": event.x,
+                "y2": event.y,
+                "color": self.drawingColor,
+                "width": self.pen_size,
+            })
             self.last_point = (x, y)
+            
+        with open('stroke.json', 'w') as f:
+            json.dump(self.stroke_data, f)
 
     def end_stroke(self, event):
         self.last_point = None
@@ -236,8 +274,11 @@ class Drawing(ctk.CTk):
     def clear_canvas(self):
         for item in self.stroke_items:
             self.canvas.delete(item)
+            
         self.stroke_items.clear()
-
+        self.stroke_data.clear()
+        with open('stroke.json', 'w') as f:
+            json.dump(self.stroke_data, f)
     def on_close(self):
         self._stop.set()
 
@@ -265,6 +306,7 @@ class Drawing(ctk.CTk):
         return image
     
     
+    
     def set_pen_size(self, value):
         self.pen_size = value
    
@@ -273,6 +315,9 @@ class Drawing(ctk.CTk):
         
     def add_marker(self):
         print("add marker from avatar")
+        
+    def send_message(self):
+        pass
 
 
 # Starting the client
