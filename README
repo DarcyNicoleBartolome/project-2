@@ -1,2 +1,103 @@
-Install pip dependecies first to run GUI.py
-   - pip install -r requirements.txt
+CPSC 581 - Project 2: Expertise Sharing
+
+An expert helps a novice with Blender. The expert sees a live picture of the
+novice's Blender window and can:
+  - draw over it (the drawing appears on the novice's screen)
+  - place Blendy, a tour-guide avatar, on the novice's 3D model
+  - plant numbered flags on the model; Blendy turns to point at each new one
+  - chat with the novice
+The novice hears a sound and sees a message whenever Blendy moves or a flag
+is planted.
+
+Requirements
+  - Windows (the screen capture uses Windows-only libraries)
+  - Python 3.12 or newer
+  - Blender 5.2 or newer
+
+
+Setting up
+  In a terminal in this folder:
+    python -m venv .venv
+    .venv\Scripts\activate
+    pip install -r requirements.txt
+
+
+Running the demo
+  1. Open "CPSC 581 - Project 2 - Test.blend" in Blender.
+     Keep Blender open; it can be behind other windows but not minimized.
+  2. Start the Blender listener:
+     a. Go to the Scripting tab.
+     b. In the Text Editor choose Text > Open... > blender_listener.py
+        (the name box at the top of the Text Editor should now say
+        blender_listener.py, not "Text". "Text" is Justice's original test
+        script, which places a Blendy and a flag at a fixed spot.)
+     c. Click Run Script (the play button), or press Alt+P with the mouse
+        over the code.
+     You can switch back to the Layout tab afterwards (it shows a bigger 3D
+     view). The listener keeps running until Blender is closed. Running the
+     script again just restarts it.
+  3. In a terminal in this folder (with .venv active):
+       python expert_gui.py
+  4. In a second terminal:
+       python novice_gui.py
+  The line under the Avatar / Marker buttons says "Blender: connected" when
+  everything is linked up.
+
+
+Expert Window
+  Brush / Eraser    Draw on, or erase from, the picture of Blender.
+  Choose Color      Brush colour. Pen Size sets the brush and eraser size.
+  Clear Canvas      Removes the whole drawing.
+  Avatar            Click on the 3D view in the picture to move Blendy there.
+  Marker            Click on the model to plant the next numbered flag;
+                    Blendy turns to face it.
+  Clear Avatar & Markers
+                    Removes Blendy and all the flags from Blender.
+  Chat              Type a message and press Enter or Send.
+
+
+How it works
+  Seeing Blender
+    Both windows find Blender's main window and take a picture of it about
+    30 times a second. If Blender isn't open yet, or is minimized, they show
+    a message and carry on once it's back.
+
+  Talking to each other
+    The expert window, the novice window and Blender talk through small JSON
+    files in %TEMP%\cpsc581_project2:
+      stroke.json            the expert's drawing
+      chat.json              chat messages
+      blender_commands.json  expert -> Blender: "place Blendy / a flag here"
+      blender_status.json    Blender -> both windows: what happened last,
+                             plus a heartbeat showing Blender is listening
+    The expert window clears these every time it starts.
+
+  Drawings
+    Lines are saved as positions on the Blender picture (0 to 1 across and
+    down) instead of screen pixels, so they land on the same spot of the
+    model in both windows, whatever size the windows are.
+
+  The Blender listener (blender_listener.py)
+    Runs inside Blender. Four times a second it checks blender_commands.json.
+    For each new Avatar or Marker click it finds the 3D view under the click,
+    shoots a line from the viewport camera through that point to find where
+    it meets the model (or the ground), and places Blendy or the next
+    numbered flag there, with a short animation. It writes the result to
+    blender_status.json so both windows can show it, and the novice window
+    plays a sound and shows a message.
+
+
+FILES
+  expert_gui.py        Expert window
+  novice_gui.py        Novice window
+  shared.py            Code both windows use: finding and capturing Blender, the picture canvas, chat, sounds, icons
+  blender_listener.py  Runs inside Blender: places Blendy and the flags
+  CPSC 581 - Project 2 - Test.blend
+  Blender scene with Blendy, the flag and an example model
+  icons/, sounds/      Button icons and sound effects
+
+
+CREDITS
+  avatar.png, marker.png, delete.png, send.png: Google Material Symbols,
+  Apache License 2.0 (https://github.com/google/material-design-icons).
+  Sound effects were generated for this project using AI (made by Claude with a Python script).

@@ -1,98 +1,121 @@
-from tkinter import filedialog
 from tkinter import *
-import customtkinter as ctk
-from PIL import Image, ImageTk, ImageGrab, ImageChops
-import threading
-import os
-import cv2
-import numpy as np
 import time
 
-import pyautogui
-import win32gui
-import win32ui
-import win32con
-
-import pygetwindow as gw
+import customtkinter as ctk
 from CTkColorPicker import *
 
-import json
+from shared import (
+    BlenderCapture, BlenderCanvas, ChatPanel,
+    CHAT_FILE, COMMAND_FILE, SHARED_DIR, STROKE_FILE,
+    load_icon, read_blender_status, write_json,
+)
 
+
+# tool buttons: the selected tool is blue, the others are grey.
+SELECTED_TOOL_COLOR = ctk.ThemeManager.theme["CTkButton"]["fg_color"]
+SELECTED_TOOL_HOVER = ctk.ThemeManager.theme["CTkButton"]["hover_color"]
+UNSELECTED_TOOL_COLOR = ("gray65", "gray28")
+UNSELECTED_TOOL_HOVER = ("gray55", "gray35")
+
+# colours for the "Blender: ..." status line under the avatar/marker buttons.
+STATUS_COLORS = {"ok": "#1bce63", "info": ("gray40", "gray70"), "warn": "#fa9108"}
 
 
 class Drawing(ctk.CTk):
     def __init__(self):
         super().__init__()
-        
-        self.myPoints = []
-        self.imgResult = None
-        self.drawingColor = "#202020"
+
+        # bright red, so it shows up on blender's dark grey background.
+        self.drawingColor = "#ea1111"
         self.pen_size = 5
-        self.eraser_mode = False
+        # what clicking on the picture does ("brush", "eraser", "avatar" = move blendy there, "marker" = add a flag there).
+        self.tool = "brush"
+
+        # every line segment drawn so far, saved as positions on the blender picture (see BlenderCanvas in shared.py).
         self.stroke_data = []
+        self.next_stroke_id = 0
+        self.stroke_items = {}  # canvas line item -> stroke id (used by the eraser)
+        self.last_point = None
+        self._save_after_id = None
 
+        # commands for blender (read by blender_listener.py).
+        # the session number lets blender know when this window was restarted.
+        self.blender_session = time.time()
+        self.blender_commands = []
+        self.blender_command_id = 0
+        self.waiting_since = None  # when we sent a command blender hasn't done yet (None = not waiting)
+        self.result_shown_at = 0   # when blender's last reply was shown
 
-        # the window name, e.g "notepad", "Chrome", etc.
-        self.window_name = "Blender"
-        self.windows = gw.getWindowsWithTitle(self.window_name)
-        if not self.windows:
-            raise RuntimeError(f"No window found with title containing {self.window_name!r}")
+        # every session starts with a blank drawing, an empty chat and no commands.
+        write_json(STROKE_FILE, [])
+        write_json(CHAT_FILE, [])
+        write_json(COMMAND_FILE, {"session": self.blender_session, "commands": []})
+        print(f"Sharing drawings, chat and Blender commands through: {SHARED_DIR}")
 
-        self.width = pyautogui.size().width
-        self.height = pyautogui.size().height
-
-        self.hwnd = self.windows[0]._hWnd
-        self.capture_width, self.capture_height = win32gui.GetClientRect(self.hwnd)[2:]
-        
-        # global coordinates and drawing state
-        self.startX, self.startY = 0, 0
-        self.isDrawing = False
-        
-        # Set the Window information
+        # set the window information
         self.title("Project 2 - Expert")
-        self.geometry("1000x650")
-        self.minsize(850, 560)
-        
-        # Layout
+        self.geometry("1000x680")
+        self.minsize(850, 600)
+
+        # layout
         self.grid_rowconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=0)
         self.grid_columnconfigure(0, weight=0)
         self.grid_columnconfigure(1, weight=1)
         self.grid_columnconfigure(2, weight=0)
 
-        # Left
+        # left
         self.left = ctk.CTkFrame(self, corner_radius=16)
         self.left.grid(row=0, column=0, padx=(18, 10), pady=(18, 10), sticky="ns")
-        
-        self.clear_button = ctk.CTkButton(self.left, text="Clear Canvas", command=self.clear_canvas)
+
+        self.clear_button = ctk.CTkButton(
+            self.left, text="Clear Canvas", image=load_icon("delete.png"), command=self.clear_canvas,
+        )
         self.clear_button.grid(row=1, column=0, padx=12, pady=9)
-        
-        self.paint_button = ctk.CTkButton(self.left, text="Paint", command=self.toggle_eraser_mode)
-        self.paint_button.grid(row=3, column=0, padx=12, pady=9)
-        
-        self.colorbutton = ctk.CTkButton(self.left, text="CHOOSE COLOR", text_color="black", command=self.ask_color)
+
+        # drawing tools (brush and eraser side by side).
+        self.tool_buttons = {}
+        self.tool_row = ctk.CTkFrame(self.left, fg_color="transparent")
+        self.tool_row.grid(row=3, column=0, padx=12, pady=9)
+        self.add_tool_button(self.tool_row, "brush", "Brush", column=0)
+        self.add_tool_button(self.tool_row, "eraser", "Eraser", column=1)
+
+        self.colorbutton = ctk.CTkButton(
+            self.left, text="CHOOSE COLOR", text_color="black",
+            fg_color=self.drawingColor, hover_color=self.drawingColor, command=self.ask_color,
+        )
         self.colorbutton.grid(row=4, column=0, padx=12, pady=6)
-        
-        self.text = ctk.CTkLabel(self.left, text="Pen Size", corner_radius=0)
-        self.text.grid(row=5, column=0, padx=12, pady=2)      
-        self.pen_size_slider = ctk.CTkSlider(self.left, from_=1, to=50, command=self.set_pen_size)
+
+        self.pen_size_label = ctk.CTkLabel(self.left, text=f"Pen Size: {self.pen_size}", corner_radius=0)
+        self.pen_size_label.grid(row=5, column=0, padx=12, pady=2)
+        self.pen_size_slider = ctk.CTkSlider(
+            self.left, from_=1, to=50, number_of_steps=49, command=self.set_pen_size,
+        )
         self.pen_size_slider.grid(row=6, column=0, padx=12, pady=2)
         self.pen_size_slider.set(self.pen_size)
-        
-        self.avatar_button = ctk.CTkButton(self.left, text="Avatar", text_color="black", command=self.handle_avatar)
-        self.avatar_button.grid(row=7, column=0, padx=12, pady=36)
-        self.marker_button = ctk.CTkButton(self.left, text="Marker", text_color="black", command=self.add_marker)
-        self.marker_button.grid(row=8, column=0, padx=12, pady=6)
-        
-        self.text2 = ctk.CTkLabel(self.left, text="Chatbox", corner_radius=0)
-        self.text2.grid(row=9, column=0, padx=12, pady=2)     
-        self.chatbox = ctk.CTkTextbox(self.left)
-        # self.chatbox.insert("0.0", "end")
-        self.chatbox.grid(row=10, column=0, padx=2, pady=2)
-        self.sendchatbutton = ctk.CTkButton(self.left, text="Send", text_color="black", command=self.send_message)
-        self.sendchatbutton.grid(row=11, column=0, padx=12, pady=6)
 
-        # Screen / preview
+        # blender tools (avatar = click to move blendy there, marker = click to add a numbered flag there).
+        self.blender_row = ctk.CTkFrame(self.left, fg_color="transparent")
+        self.blender_row.grid(row=7, column=0, padx=12, pady=(22, 4))
+        self.add_tool_button(self.blender_row, "avatar", "Avatar", column=0)
+        self.add_tool_button(self.blender_row, "marker", "Marker", column=1)
+
+        self.clear_blender_button = ctk.CTkButton(
+            self.left, text="Clear Avatar & Markers", image=load_icon("delete.png"), command=self.clear_blender,
+        )
+        self.clear_blender_button.grid(row=8, column=0, padx=12, pady=4)
+
+        self.blender_status = ctk.CTkLabel(
+            self.left, text="Blender: checking...", wraplength=200, justify="center",
+            font=ctk.CTkFont(size=12), text_color=STATUS_COLORS["info"],
+        )
+        self.blender_status.grid(row=9, column=0, padx=8, pady=(0, 4))
+
+        # chat with the novice (see ChatPanel in shared.py).
+        self.chat = ChatPanel(self.left, me="Expert", other="novice")
+        self.chat.grid(row=10, column=0, padx=8, pady=(8, 10))
+
+        # screen / preview
         self.center = ctk.CTkFrame(self, corner_radius=18)
         self.center.grid(
             row=0, column=1,
@@ -112,219 +135,246 @@ class Drawing(ctk.CTk):
 
         self.preview.grid_rowconfigure(0, weight=1)
         self.preview.grid_columnconfigure(0, weight=1)
-        
-        self.canvas = Canvas(self.preview, highlightthickness=0,
-                                    cursor="crosshair")
+
+        # live picture of blender, with the expert's drawing on top.
+        self.capture = BlenderCapture()
+        self.canvas = BlenderCanvas(
+            self.preview, self.capture, on_picture_moved=self.redraw_strokes, cursor="crosshair",
+        )
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self.canvas.bind("<Button-1>", self.start_stroke)
         self.canvas.bind("<B1-Motion>", self.draw_stroke)
         self.canvas.bind("<ButtonRelease-1>", self.end_stroke)
-        self.last_point = None
-        self.stroke_items = []
-        self._canvas_save_after_id = None
-        
-        # Create the background image item once, then update it each frame.
-        self.video_item = self.canvas.create_image((0,0), image="", anchor=NW)
-        
+        self.canvas.bind("<Motion>", self.move_size_preview)
+        self.canvas.bind("<Leave>", lambda event: self.canvas.itemconfigure(self.size_preview, state=HIDDEN))
 
-        # Camera state
-        self._stop = threading.Event()
-        self._latest_frame_rgb = None
-        self._frame_lock = threading.Lock()
-        self._latest_imgtk = None
-        self._capture_interval = 1 / 30
-        
-        # with Image.open("test.png") as im:
-        self.x1 = self.canvas.winfo_rootx() + self.canvas.winfo_x()
-        self.y1 = self.canvas.winfo_rooty() + self.canvas.winfo_y()
-        self.x2 = self.x1 + self.canvas.winfo_width()
-        self.y2 = self.y1 + self.canvas.winfo_height()
+        # circle that follows the mouse to show the brush/eraser size.
+        self.size_preview = self.canvas.create_oval(0, 0, 0, 0, width=1, state=HIDDEN)
 
-        threading.Thread(
-            target=self._reader_loop,
-            daemon=True
-        ).start()
+        self.set_tool("brush")
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.after(300, self.check_blender_status)
 
-        self.after(33, self._render_latest_frame)
+    def add_tool_button(self, parent, tool, text, column):
+        button = ctk.CTkButton(
+            parent, text=text, width=68, image=load_icon(f"{tool}.png"),
+            command=lambda: self.set_tool(tool),
+        )
+        button.grid(row=0, column=column, padx=(0, 4) if column == 0 else 0)
+        self.tool_buttons[tool] = button
 
-
-    def _reader_loop(self):
-        while not self._stop.is_set():
-            started = time.perf_counter()
-            try:
-                frame = self.background_screenshot(
-                    self.hwnd, self.capture_width, self.capture_height
-                )
-                # BitBlt creates a BGRA buffer, not a BGR one.
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
-
-                # Overlay a pointer marker because background window captures
-                # commonly omit the Windows cursor.
-                cursor_x, cursor_y = pyautogui.position()
-                left, top, _, _ = win32gui.GetWindowRect(self.hwnd)
-                cursor_x -= left
-                cursor_y -= top
-                if 0 <= cursor_x < frame_rgb.shape[1] and 0 <= cursor_y < frame_rgb.shape[0]:
-                    cv2.circle(frame_rgb, (cursor_x, cursor_y), 9, (255, 255, 255), 2)
-                    cv2.circle(frame_rgb, (cursor_x, cursor_y), 3, (255, 40, 40), -1)
-
-                with self._frame_lock:
-                    self._latest_frame_rgb = frame_rgb
-            except Exception as exc:
-                print(f"Screen capture failed: {exc}")
-
-            # Keep capture cadence near 30 FPS without consuming a CPU core.
-            remaining = self._capture_interval - (time.perf_counter() - started)
-            if remaining > 0:
-                self._stop.wait(remaining)
-
-
-    def _render_latest_frame(self):
-        if self._stop.is_set():
-            return
-
-        with self._frame_lock:
-            frame = (
-                self._latest_frame_rgb.copy()
-                if self._latest_frame_rgb is not None
-                else None
-            )
-
-        if frame is not None:
-            imgResult = frame.copy()
-            self.imgResult = imgResult
-            # self.drawOnCanvas()
-            
-            # Convert NumPy frame to a Pillow image
-            pil_image = Image.fromarray(self.imgResult)
-
-            # Resize to fit the preview
-            width = max(self.canvas.winfo_width(), 1)
-            height = max(self.canvas.winfo_height(), 1)
-
-            pil_image.thumbnail((width, height), Image.Resampling.BILINEAR)
-
-            # Create PhotoImage version
-            self._latest_imgtk = ImageTk.PhotoImage(pil_image)
-            x = max((self.canvas.winfo_width() - self._latest_imgtk.width()) // 2, 0)
-            y = max((self.canvas.winfo_height() - self._latest_imgtk.height()) // 2, 0)
-            self.canvas.coords(self.video_item, x, y)
-            self.canvas.itemconfigure(self.video_item, image=self._latest_imgtk)
-            self.canvas.tag_lower(self.video_item)
-
-        self.after(33, self._render_latest_frame)
-
-
+    # user clicked on the picture: start a line, erase, or place something in blender (depends on the tool).
     def start_stroke(self, event):
-        self.last_point = (event.x, event.y)
-    
-    def draw_stroke(self, event):
-        if self.eraser_mode:
-            x1, y1 = event.x-self.pen_size/2, event.y-self.pen_size/2
-            x2, y2 = event.x+self.pen_size/2, event.y+self.pen_size/2
-            # find all items under cursor
-            items = self.canvas.find_overlapping(x1, y1, x2, y2)
-            # erase items except the background image
-            for item in items:
-                if item in self.stroke_items:
-                    self.canvas.delete(item)
-                    self.stroke_items.remove(item)
-
-                    self.stroke_data = [
-                        stroke for stroke in self.stroke_data if stroke["item"] != item
-                    ]
-
-                    
-        elif self.last_point is None:
+        if self.tool in ("avatar", "marker"):
+            self.place_in_blender(event)
             return
-        else:
-            x, y = event.x, event.y
-            item = self.canvas.create_line(
-                self.last_point[0], self.last_point[1], x, y,
-                fill=self.drawingColor, width=self.pen_size, capstyle=ROUND, joinstyle=ROUND,
-                smooth=True,
-                tags="line"
-            )
-            self.stroke_items.append(item)
-            self.stroke_data.append({
-                "type": "stroke",
-                "item": item,
-                "x1": self.last_point[0],
-                "y1": self.last_point[1],
-                "x2": event.x,
-                "y2": event.y,
-                "color": self.drawingColor,
-                "width": self.pen_size,
-            })
-            self.last_point = (x, y)
-            
-        with open('stroke.json', 'w') as f:
-            json.dump(self.stroke_data, f)
+        self.last_point = (event.x, event.y)
+        if self.tool == "eraser":
+            self.erase_at(event.x, event.y)
+
+    # user is dragging the mouse: add the next line segment, or keep erasing.
+    def draw_stroke(self, event):
+        if self.tool not in ("brush", "eraser"):
+            return
+        self.move_size_preview(event)
+
+        if self.tool == "eraser":
+            self.erase_at(event.x, event.y)
+            return
+        # nothing to draw on until the first picture of blender has arrived.
+        if self.last_point is None or self.canvas.picture_rect is None:
+            return
+
+        start = self.canvas.to_picture(*self.last_point)
+        end = self.canvas.to_picture(event.x, event.y)
+        stroke = {
+            "type": "stroke",
+            "id": self.next_stroke_id,
+            "x1": start[0],
+            "y1": start[1],
+            "x2": end[0],
+            "y2": end[1],
+            "color": self.drawingColor,
+            # thickness as a fraction of the picture width, so it scales too.
+            "width": self.pen_size / self.canvas.picture_rect[2],
+        }
+        self.next_stroke_id += 1
+        self.stroke_data.append(stroke)
+
+        item = self.canvas.draw_segment(stroke, tags="line")
+        self.stroke_items[item] = stroke["id"]
+        self.canvas.tag_raise(self.size_preview)
+
+        self.last_point = (event.x, event.y)
+        self.schedule_save()
 
     def end_stroke(self, event):
-        self.last_point = None
-    
-    def toggle_eraser_mode(self):
-        self.eraser_mode = not self.eraser_mode
-        if self.eraser_mode:
-            self.paint_button.configure(text="Erase")
-        else:
-            self.paint_button.configure(text="Paint")
+        if self.last_point is not None:
+            self.last_point = None
+            self.save_strokes()
+
+    # deletes every line segment under the eraser circle.
+    def erase_at(self, x, y):
+        radius = max(self.pen_size / 2, 4)
+        erased = set()
+        for item in self.canvas.find_overlapping(x - radius, y - radius, x + radius, y + radius):
+            stroke_id = self.stroke_items.pop(item, None)
+            if stroke_id is not None:  # skips the blender picture and the size circle
+                self.canvas.delete(item)
+                erased.add(stroke_id)
+
+        if erased:
+            self.stroke_data = [stroke for stroke in self.stroke_data if stroke["id"] not in erased]
+            self.schedule_save()
+
+    # the blender picture moved or changed size, so redraw every line in its new spot.
+    def redraw_strokes(self):
+        self.canvas.delete("line")
+        self.stroke_items.clear()
+        for stroke in self.stroke_data:
+            item = self.canvas.draw_segment(stroke, tags="line")
+            self.stroke_items[item] = stroke["id"]
+        self.canvas.tag_raise(self.size_preview)
 
     def clear_canvas(self):
-        for item in self.stroke_items:
-            self.canvas.delete(item)
-            
+        self.canvas.delete("line")
         self.stroke_items.clear()
         self.stroke_data.clear()
-        with open('stroke.json', 'w') as f:
-            json.dump(self.stroke_data, f)
-    def on_close(self):
-        self._stop.set()
+        self.save_strokes()
 
-        self.destroy()
-        
+    # saves the strokes for the novice at most 20 times a second while drawing.
+    def schedule_save(self):
+        if self._save_after_id is None:
+            self._save_after_id = self.after(50, self.save_strokes)
+
+    def save_strokes(self):
+        if self._save_after_id is not None:
+            self.after_cancel(self._save_after_id)
+            self._save_after_id = None
+        write_json(STROKE_FILE, self.stroke_data)
+
+    def set_tool(self, tool):
+        self.tool = tool
+        for name, button in self.tool_buttons.items():
+            selected = name == tool
+            button.configure(
+                fg_color=SELECTED_TOOL_COLOR if selected else UNSELECTED_TOOL_COLOR,
+                hover_color=SELECTED_TOOL_HOVER if selected else UNSELECTED_TOOL_HOVER,
+            )
+        # crosshair for drawing, pointing hand for placing things in blender.
+        self.canvas.configure(cursor="crosshair" if tool in ("brush", "eraser") else "hand2")
+        self.canvas.itemconfigure(self.size_preview, state=HIDDEN)
+        self.update_size_preview_style()
+
     def ask_color(self):
         pick_color = AskColor() # open the color picker
         color = pick_color.get() # get the color string
-        self.colorbutton.configure(fg_color=color)
+        if not color:  # the picker was closed without choosing
+            return
+        self.colorbutton.configure(fg_color=color, hover_color=color)
         self.drawingColor = color
+        # picking a colour means the user wants to draw, so switch back to the brush.
+        self.set_tool("brush")
 
-    def background_screenshot(self, hwnd, width, height):
-        wDC = win32gui.GetWindowDC(hwnd)
-        dcObj=win32ui.CreateDCFromHandle(wDC)
-        cDC=dcObj.CreateCompatibleDC()
-        dataBitMap = win32ui.CreateBitmap()
-        dataBitMap.CreateCompatibleBitmap(dcObj, width, height)
-        cDC.SelectObject(dataBitMap)
-        cDC.BitBlt((0,0),(width, height) , dcObj, (0,0), win32con.SRCCOPY)
-        image = np.frombuffer(dataBitMap.GetBitmapBits(True), dtype=np.uint8).reshape(height, width, 4)
-        dcObj.DeleteDC()
-        cDC.DeleteDC()
-        win32gui.ReleaseDC(hwnd, wDC)
-        win32gui.DeleteObject(dataBitMap.GetHandle())
-        return image
-    
-    
-    
     def set_pen_size(self, value):
-        self.pen_size = value
-   
-    def handle_avatar(self):
-        print("handle avatar")
-        
-    def add_marker(self):
-        print("add marker from avatar")
-        
-    def send_message(self):
-        pass
+        self.pen_size = int(value)
+        self.pen_size_label.configure(text=f"Pen Size: {self.pen_size}")
+
+    # moves the size circle to the mouse (only for the brush and eraser).
+    def move_size_preview(self, event):
+        if self.tool not in ("brush", "eraser"):
+            return
+        radius = max(self.pen_size / 2, 4) if self.tool == "eraser" else max(self.pen_size / 2, 1)
+        self.canvas.coords(
+            self.size_preview,
+            event.x - radius, event.y - radius, event.x + radius, event.y + radius,
+        )
+        self.canvas.itemconfigure(self.size_preview, state=NORMAL)
+        self.canvas.tag_raise(self.size_preview)
+
+    # solid circle in the drawing colour for the brush, dashed white circle for the eraser.
+    def update_size_preview_style(self):
+        if self.tool == "eraser":
+            self.canvas.itemconfigure(self.size_preview, outline="white", dash=(3, 2))
+        else:
+            self.canvas.itemconfigure(self.size_preview, outline=self.drawingColor, dash="")
+
+    # avatar or marker tool: sends the clicked spot to blender.
+    def place_in_blender(self, event):
+        if self.canvas.picture_rect is None:
+            return
+        u, v = self.canvas.to_picture(event.x, event.y)
+        if not (0 <= u <= 1 and 0 <= v <= 1):
+            self.show_blender_status("Click on the picture of Blender", "warn")
+            return
+        action = "avatar" if self.tool == "avatar" else "flag"
+        self.send_blender_command(action, u=u, v=v)
+        self.show_click_ping(event.x, event.y)
+
+    def clear_blender(self):
+        self.send_blender_command("clear")
+
+    def send_blender_command(self, action, **details):
+        self.blender_command_id += 1
+        self.blender_commands.append({"id": self.blender_command_id, "action": action, **details})
+        self.blender_commands = self.blender_commands[-50:]  # blender only needs the recent ones
+        write_json(COMMAND_FILE, {"session": self.blender_session, "commands": self.blender_commands})
+        self.waiting_since = time.monotonic()
+        self.show_blender_status("Sending to Blender...", "info")
+
+    # shows what blender did with the last command, or whether it's listening.
+    def check_blender_status(self):
+        if not self.winfo_exists():
+            return
+        status, connected = read_blender_status()
+        done = (
+            status is not None
+            and status.get("session") == self.blender_session
+            and status.get("last_id", 0) >= self.blender_command_id
+        )
+
+        if self.waiting_since is not None:
+            if done:
+                self.waiting_since = None
+                self.result_shown_at = time.monotonic()
+                self.show_blender_status(status.get("message", "Done"), "ok" if status.get("ok") else "warn")
+            elif time.monotonic() - self.waiting_since > 3:
+                self.show_blender_status(
+                    "Blender isn't responding. In Blender, run blender_listener.py (see README).", "warn")
+        elif time.monotonic() - self.result_shown_at > 4:
+            if connected:
+                self.show_blender_status("Blender: connected", "ok")
+            else:
+                self.show_blender_status(
+                    "Blender: not connected. In Blender, run blender_listener.py (see README).", "warn")
+
+        self.after(300, self.check_blender_status)
+
+    def show_blender_status(self, text, kind):
+        self.blender_status.configure(text=text, text_color=STATUS_COLORS[kind])
+
+    # ring that grows where the expert clicked, so they can see the click was sent.
+    def show_click_ping(self, x, y, step=0, ring=None):
+        if ring is None:
+            ring = self.canvas.create_oval(x, y, x, y, outline="#ffb454", width=3)
+        radius = 4 + step * 4
+        self.canvas.coords(ring, x - radius, y - radius, x + radius, y + radius)
+        self.canvas.itemconfigure(ring, width=max(1, 3 - step // 3))
+        if step < 8:
+            self.after(30, lambda: self.show_click_ping(x, y, step + 1, ring))
+        else:
+            self.canvas.delete(ring)
+
+    def on_close(self):
+        self.capture.stop()
+        self.destroy()
 
 
-# Starting the client
+# starting the client
 def start_screen():
-   # Start GUI
+   # start GUI
    app = Drawing()
    app.mainloop()
-      
+
 if __name__ == "__main__":
    start_screen()

@@ -1,0 +1,6 @@
+# Python
+__pycache__/
+.venv/
+
+# Blender makes a backup copy (.blend1) every time a .blend file is saved
+*.blend1
