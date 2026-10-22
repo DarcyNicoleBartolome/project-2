@@ -99,5 +99,8 @@ FILES
 
 CREDITS
   avatar.png, marker.png, delete.png, send.png: Google Material Symbols,
+  brush.png icon: https://icons8.com/icon/1059/paint
+  eraser.png icon: https://icons8.com/icon/8181/eraser
   Apache License 2.0 (https://github.com/google/material-design-icons).
   Sound effects were generated for this project using AI (made by Claude with a Python script).
+  Microsoft Copilot was used at the beginning of the development to assist on testing the data transfer drawing strokes from expert GUI's canvas to novice GUI's canvas.
